@@ -63,6 +63,22 @@ docker run -p 3000:3000 anime-sama-pdf
 
 `start`/`end` sont optionnels : sans valeur, toute l'œuvre est traitée.
 
+## Piège : les espaces finaux du nom d'œuvre
+
+L'API `get_nb_chap_et_img.php` et les dossiers d'images s'appellent avec la chaîne
+**exacte** de `#titreOeuvre`, espaces finaux compris. Le catalogue n'est pas homogène :
+
+| œuvre | chaîne attendue |
+|---|---|
+| `Noblesse` | `"Noblesse"` (rien) |
+| `Tower of God` | `"Tower of God "` (1 espace) |
+| `Return of the Frozen Player` | `"Return of the Frozen Player   "` (3 espaces) |
+
+Normaliser ces espaces casse la recherche. `resolve()` renvoie donc la valeur brute du
+DOM, `listChapters()` teste des variantes jusqu'à ce que l'API réponde, et un `HEAD`
+sur `/s2/scans/<œuvre>/<chap>/1.jpg` confirme que le dossier d'images correspond.
+**Ne pas « nettoyer » cette chaîne.**
+
 ## Ce qu'il faut savoir
 
 - **Disque éphémère.** Les PDF vivent sur le disque du serveur. Un redéploiement les

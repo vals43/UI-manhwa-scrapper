@@ -54,16 +54,15 @@ app.post("/api/analyze", rateLimit({ windowMs: 60_000, max: ANALYZE_MAX }), asyn
   try {
     const url = String(req.body?.url || "").trim();
     if (!scraper.isAllowedUrl(url)) throw new Error("Seuls les liens anime-sama.to sont acceptés");
-    const info = await scraper.resolve(url);
-    const list = await scraper.listChapters(info.oeuvre);
+    const info = await scraper.resolveOeuvre(url);
     res.json({
       slug: info.slug,
       oeuvre: info.oeuvre.trim(),
       lang: info.lang,
-      firstChapter: list.first,
-      lastChapter: list.last,
-      totalChapters: list.total,
-      pages: list.pages,
+      firstChapter: info.first,
+      lastChapter: info.last,
+      totalChapters: info.total,
+      pages: info.pages,
     });
   } catch (error) {
     res.status(400).json({ error: error.message });

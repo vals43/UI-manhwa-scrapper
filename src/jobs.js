@@ -67,8 +67,8 @@ export async function createJob({ url, start, end, ip = null }) {
   if (!scraper.isAllowedUrl(url)) throw new Error("URL non autorisée");
   if (!scraper.HOSTS.includes(new URL(url).hostname.toLowerCase())) throw new Error("Hôte non autorisé");
 
-  const info = await scraper.resolve(url);
-  const list = await scraper.listChapters(info.oeuvre);
+  const info = await scraper.resolveOeuvre(url);
+  const list = { first: info.first, last: info.last, pages: info.pages, total: info.total };
 
   let from = Number.parseInt(start, 10);
   let to = Number.parseInt(end, 10);

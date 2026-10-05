@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import http from "node:http";
 import path from "node:path";
+import { PDFDocument } from "pdf-lib";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PORT = 3211;
@@ -67,15 +68,29 @@ assert.equal(good.body.oeuvre, "The Greatest Estate Developer");
 assert.equal(good.body.lastChapter, 222);
 console.log(`    ${good.body.oeuvre} — 1–${good.body.lastChapter} ✓`);
 
+// Régression : cette œuvre a trois espaces finaux dans #titreOeuvre.
+const frozen = await post("/api/analyze", {
+  url: "https://anime-sama.to/catalogue/return-of-the-frozen-player/scan/vf/",
+});
+assert.equal(frozen.status, 200, `analyze Frozen Player a échoué : ${JSON.stringify(frozen.body)}`);
+assert.equal(frozen.body.oeuvre, "Return of the Frozen Player");
+assert.equal(frozen.body.lastChapter, 225);
+assert.equal(frozen.body.totalChapters, 225);
+console.log(`    ${frozen.body.oeuvre} — 1–${frozen.body.lastChapter} ✓`);
+
 for (const bad of ["http://169.254.169.254/", "https://anime-sama.to.evil.com/x", "https://mangatown.com/manga/x/", "pas une url"]) {
   const res = await post("/api/analyze", { url: bad });
   assert.equal(res.status, 400, `${bad} aurait dû être refusé`);
 }
 console.log("    SSRF, sous-domaine piégé, autre site, URL invalide → 400 ✓");
 
-console.log("\n[4] job chapitre 222");
-const created = await post("/api/jobs", { url: URL, start: 222, end: 222 });
-assert.equal(created.status, 202);
+console.log("\n[4] job Frozen Player chapitre 1 (dossier d'images à 3 espaces)");
+const created = await post("/api/jobs", {
+  url: "https://anime-sama.to/catalogue/return-of-the-frozen-player/scan/vf/",
+  start: 1,
+  end: 1,
+});
+assert.equal(created.status, 202, JSON.stringify(created.body));
 const id = created.body.id;
 console.log(`    job ${id.slice(0, 8)}… créé (202) ✓`);
 
@@ -87,21 +102,26 @@ for (let i = 0; i < 200; i++) {
 }
 assert.equal(state.status, "done", `statut ${state.status}`);
 assert.equal(state.progress.done, 1);
-assert.equal(state.chapters[0].pages, 14);
-assert.equal(state.chapters[0].downloadUrl, `/api/jobs/${id}/chap/222.pdf`);
-console.log(`    terminé, 14 pages ✓`);
+assert.equal(state.progress.failed, 0, JSON.stringify(state.chapters));
+assert.equal(state.chapters[0].pages, 11, "11 pages attendues");
+assert.equal(state.chapters[0].downloadUrl, `/api/jobs/${id}/chap/1.pdf`);
+console.log(`    terminé, 11 pages téléchargées ✓`);
 
 console.log("\n[5] téléchargement du PDF");
-const pdf = await req(`/api/jobs/${id}/chap/222.pdf`);
+const pdf = await req(`/api/jobs/${id}/chap/1.pdf`);
 assert.equal(pdf.status, 200);
 assert.match(pdf.headers.get("content-type"), /application\/pdf/);
-assert.match(pdf.headers.get("content-disposition") || "", /chapitre222\.pdf/);
+assert.match(pdf.headers.get("content-disposition") || "", /chapitre1\.pdf/);
 assert.equal(Buffer.from(pdf.body).slice(0, 5).toString(), "%PDF-");
-console.log(`    PDF servi, ${(pdf.body.byteLength / 1024).toFixed(0)} Ko, magic %PDF- ✓`);
+const doc = await PDFDocument.load(Buffer.from(pdf.body));
+const widths = [...new Set(doc.getPages().map(p => Math.round(p.getWidth())))];
+assert.equal(doc.getPageCount(), 11);
+assert.deepEqual(widths, [800], `largeurs ${widths} au lieu de [800]`);
+console.log(`    PDF servi, ${(pdf.body.byteLength / 1024).toFixed(0)} Ko, ${doc.getPageCount()} pages, largeur ${widths[0]} ✓`);
 
 console.log("\n[6] cas d'erreur");
 const cases = [
-  [`/api/jobs/${id}/chap/1.pdf`, 404, "chapitre hors de la plage du job"],
+  [`/api/jobs/${id}/chap/2.pdf`, 404, "chapitre hors de la plage du job"],
   [`/api/jobs/${id}/chap/99999999999999999999.pdf`, 404, "chapitre inexistant"],
   ["/api/jobs/00000000-0000-0000-0000-000000000000", 404, "job inconnu"],
   ["/api/nimporte-quoi", 404, "route inconnue"],

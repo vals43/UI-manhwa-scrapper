@@ -6,6 +6,7 @@ import * as jobs from "../src/jobs.js";
 import * as scraper from "../src/scrapers/anime-sama.js";
 
 const URL = "https://anime-sama.to/catalogue/the-greatest-estate-developer/scan/vf/";
+const FROZEN = "https://anime-sama.to/catalogue/return-of-the-frozen-player/scan/vf/";
 const DATA_DIR = process.env.DATA_DIR;
 const KEEP = Number(process.env.MAX_PDFS_KEPT);
 const waitDone = async id => {
@@ -23,6 +24,39 @@ const widths = async file => {
 
 await fs.rm(DATA_DIR, { recursive: true, force: true });
 await jobs.init();
+
+console.log(`\n[0] résolution d'œuvre : espaces finaux préservés`);
+const trailing = value => value.slice(value.trimEnd().length);
+
+for (const [label, url, expectedTotal] of [
+  ["estate ", URL, 222],
+  ["frozen", FROZEN, 225],
+]) {
+  const raw = await scraper.resolve(url);
+  const info = await scraper.resolveOeuvre(url);
+  assert.equal(
+    trailing(info.oeuvre),
+    trailing(raw.oeuvre),
+    `${label} : les espaces finaux ont été modifiés (${JSON.stringify(info.oeuvre)})`,
+  );
+  assert.equal(info.total, expectedTotal, `${label} : ${info.total} chapitres au lieu de ${expectedTotal}`);
+  console.log(`    ${label} ${JSON.stringify(info.oeuvre)} → ${info.total} ch. ✓`);
+}
+
+const frozen = await scraper.resolveOeuvre(FROZEN);
+assert.equal(frozen.oeuvre, "Return of the Frozen Player   ", "les 3 espaces finaux sont obligatoires");
+assert.equal(frozen.first, 1);
+assert.equal(frozen.last, 225);
+assert.equal(frozen.pages[1], 11);
+console.log(`    régression Frozen Player (3 espaces) ✓`);
+
+const estate = await scraper.resolveOeuvre(URL);
+assert.equal(estate.oeuvre, "The Greatest Estate Developer ", "1 espace final");
+console.log(`    régression Estate (1 espace) ✓`);
+
+assert.deepEqual(scraper.oeuvreVariants("A  B  "), ["A  B  ", "A B  ", "A B ", "A B"]);
+assert.deepEqual(scraper.oeuvreVariants("C "), ["C ", "C"]);
+console.log(`    variantes d'œuvre ✓`);
 
 console.log(`\n[1] allowlist`);
 assert.equal(scraper.isAllowedUrl("http://169.254.169.254/"), false);

@@ -15,27 +15,61 @@ const MAX_FAILS = 3;
 const agent = new https.Agent({ family: 4, keepAlive: true, maxSockets: CONCURRENCY });
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-function fetchBuffer(url, redirects = 0) {
+export class HttpError extends Error {
+  constructor(status, url) {
+    super(
+      status === 403
+        ? "Le site source bloque temporairement (protection anti-bot). Réessaie dans quelques minutes."
+        : status === 429
+          ? "Le site source limite les requêtes. Réessaie dans quelques minutes."
+          : status === 404
+            ? "Introuvable sur le site source"
+            : `Le site source a répondu HTTP ${status}`,
+    );
+    this.name = "HttpError";
+    this.status = status;
+    this.url = url;
+  }
+}
+
+const retryable = error =>
+  !(error instanceof HttpError) ||
+  error.status === 403 ||
+  error.status === 429 ||
+  error.status >= 500;
+
+const backoffFor = error =>
+  error instanceof HttpError && (error.status === 403 || error.status === 429)
+    ? [5000, 15000]
+    : [800, 1600];
+
+function request(url, { method = "GET", redirects = 0 } = {}) {
   return new Promise((resolve, reject) => {
-    https
-      .get(url, { agent, headers: { "User-Agent": UA } }, res => {
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          if (redirects > 3) return reject(new Error("Trop de redirections"));
-          res.resume();
-          return resolve(fetchBuffer(new URL(res.headers.location, url).href, redirects + 1));
-        }
-        if (res.statusCode !== 200) {
-          res.resume();
-          return reject(new Error(`HTTP ${res.statusCode}`));
-        }
-        const chunks = [];
-        res.on("data", chunk => chunks.push(chunk));
-        res.on("end", () => resolve(Buffer.concat(chunks)));
-        res.on("error", reject);
-      })
-      .on("error", reject);
+    const call = https.request(url, { agent, method, headers: { "User-Agent": UA } }, res => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        if (redirects > 3) return reject(new Error("Trop de redirections"));
+        return resolve(request(new URL(res.headers.location, url).href, { method, redirects: redirects + 1 }));
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        return reject(new HttpError(res.statusCode, url));
+      }
+      if (method === "HEAD") {
+        res.resume();
+        return resolve(Buffer.alloc(0));
+      }
+      const chunks = [];
+      res.on("data", chunk => chunks.push(chunk));
+      res.on("end", () => resolve(Buffer.concat(chunks)));
+      res.on("error", reject);
+    });
+    call.on("error", reject);
+    call.end();
   });
 }
+
+const fetchBuffer = url => request(url);
 
 export function isAllowedUrl(raw) {
   try {
@@ -52,12 +86,22 @@ async function withRetry(label, fn, tries = 3) {
       return await fn();
     } catch (error) {
       last = error;
-      if (attempt === tries) break;
-      console.warn(`  ${label} : ${error.message} (essai ${attempt}/${tries})`);
-      await sleep(800 * attempt);
+      if (!retryable(error) || attempt === tries) break;
+      const wait = backoffFor(error)[Math.min(attempt - 1, 1)];
+      console.warn(`  ${label} : ${error.message} (essai ${attempt}/${tries}, ${wait / 1000}s)`);
+      await sleep(wait);
     }
   }
   throw last;
+}
+
+// L'API et les dossiers d'images d'Anime-Sama s'appellent avec la chaîne EXACTE
+// de #titreOeuvre, espaces finaux compris : "Return of the Frozen Player   " en
+// compte trois. Toute normalisation casse les œuvres concernées.
+export function oeuvreVariants(raw) {
+  const core = raw.replace(/[\t\n\r]+/g, " ").replace(/ {2,}/g, " ").trimEnd();
+  const trail = raw.slice(raw.trimEnd().length);
+  return [...new Set([raw, core + trail, core + " ", core])].filter(candidate => candidate.trim());
 }
 
 export async function resolve(rawUrl) {
@@ -71,10 +115,10 @@ export async function resolve(rawUrl) {
   const titre = page.toString("utf8").match(/id="titreOeuvre"[^>]*>([\s\S]*?)<\/[a-z0-9]+>/i);
   if (!titre) throw new Error("Œuvre introuvable sur cette page");
 
-  const oeuvre = decodeEntities(titre[1]).trimEnd() + " ";
-  if (!oeuvre.trim()) throw new Error("Nom d'œuvre vide");
+  const raw = decodeEntities(titre[1]);
+  if (!raw.trim()) throw new Error("Nom d'œuvre vide");
 
-  return { slug: match[1], lang: match[2].toLowerCase(), oeuvre, url: url.href };
+  return { slug: match[1], lang: match[2].toLowerCase(), oeuvre: raw, url: url.href };
 }
 
 function decodeEntities(value) {
@@ -87,11 +131,15 @@ function decodeEntities(value) {
     .replace(/&nbsp;/g, " ");
 }
 
-export async function listChapters(oeuvre) {
-  const raw = await withRetry("API chapitres", () =>
-    fetchBuffer(`${API}?oeuvre=${encodeURIComponent(oeuvre)}`)
-  );
-  const data = JSON.parse(raw.toString("utf8"));
+async function tryListChapters(oeuvre) {
+  let data;
+  try {
+    const raw = await fetchBuffer(`${API}?oeuvre=${encodeURIComponent(oeuvre)}`);
+    data = JSON.parse(raw.toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!data || typeof data !== "object") return null;
 
   const pages = {};
   for (const [key, value] of Object.entries(data)) {
@@ -99,11 +147,53 @@ export async function listChapters(oeuvre) {
     const count = Number.parseInt(value, 10);
     if (Number.isFinite(chap) && Number.isFinite(count) && count > 0) pages[chap] = count;
   }
-
   const list = Object.keys(pages).map(Number).sort((a, b) => a - b);
-  if (!list.length) throw new Error("Aucun chapitre listé par l'API");
+  if (!list.length) return null;
 
   return { pages, first: list[0], last: list[list.length - 1], total: list.length };
+}
+
+// Retourne la variante qui répond réellement, pas seulement la première.
+export async function listChapters(oeuvre) {
+  for (const candidate of oeuvreVariants(oeuvre)) {
+    const result = await withRetry("API chapitres", () => tryListChapters(candidate));
+    if (result) {
+      if (candidate !== oeuvre) {
+        console.warn(`  « ${oeuvre} » rejeté par l'API, variante gagnante : ${JSON.stringify(candidate)}`);
+      }
+      return { oeuvre: candidate, ...result };
+    }
+  }
+  throw new Error("Aucun chapitre listé par l'API");
+}
+
+// Un HEAD suffit : le dossier d'images doit porter le même nom que la clé d'API.
+async function folderExists(oeuvre, chap) {
+  try {
+    await request(`${SCAN_BASE}${encodeURIComponent(oeuvre)}/${chap}/1.jpg`, { method: "HEAD" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function resolveOeuvre(rawUrl) {
+  const info = await resolve(rawUrl);
+  const list = await listChapters(info.oeuvre);
+
+  if (await folderExists(list.oeuvre, list.first)) {
+    return { ...info, oeuvre: list.oeuvre, ...list };
+  }
+
+  for (const candidate of oeuvreVariants(info.oeuvre)) {
+    if (candidate === list.oeuvre) continue;
+    const alt = await withRetry("API chapitres", () => tryListChapters(candidate));
+    if (alt && (await folderExists(candidate, alt.first))) {
+      return { ...info, oeuvre: candidate, ...alt };
+    }
+  }
+
+  throw new Error("Chapitres listés par l'API mais dossier d'images introuvable");
 }
 
 async function downloadOne(outDir, oeuvre, chap, page) {
@@ -131,6 +221,7 @@ async function downloadOne(outDir, oeuvre, chap, page) {
         console.error(`  chap ${chap} page ${page} : ${error.message}`);
         return false;
       }
+      if (!retryable(error)) return false;
       await sleep(600 * attempt);
     }
   }
