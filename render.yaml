@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: anime-sama-scans
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm install --omit=dev --no-audit --no-fund
+    startCommand: node src/server.js
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: MAX_PDFS_KEPT
+        value: "20"
+      - key: DATA_DIR
+        value: /tmp/manhwa

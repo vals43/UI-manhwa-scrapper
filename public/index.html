@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scans Anime-Sama → PDF</title>
+<style>
+  :root { color-scheme: dark; --bg:#0e1116; --card:#161b22; --line:#2a313c; --txt:#e6edf3; --mut:#8b949e; --acc:#4a9eff; --ok:#3fb950; --err:#f85149; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px 16px 64px; background:var(--bg); color:var(--txt); font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  main { max-width:720px; margin:0 auto; }
+  h1 { font-size:1.4rem; margin:0 0 4px; }
+  p.sub { margin:0 0 24px; color:var(--mut); font-size:.9rem; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  label { display:block; font-size:.82rem; color:var(--mut); margin-bottom:6px; }
+  input { width:100%; padding:10px 12px; background:#0d1117; color:var(--txt); border:1px solid var(--line); border-radius:6px; font-size:15px; }
+  input:focus { outline:none; border-color:var(--acc); }
+  .row { display:flex; gap:12px; }
+  .row > div { flex:1; }
+  button { padding:10px 18px; border:0; border-radius:6px; background:var(--acc); color:#04101f; font-weight:600; font-size:15px; cursor:pointer; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button.ghost { background:transparent; color:var(--mut); border:1px solid var(--line); }
+  button.danger { background:transparent; color:var(--err); border:1px solid var(--err); }
+  .actions { display:flex; gap:10px; margin-top:14px; flex-wrap:wrap; }
+  .msg { margin-top:12px; font-size:.88rem; }
+  .msg.err { color:var(--err); }
+  .msg.ok { color:var(--ok); }
+  .meta { display:flex; gap:16px; flex-wrap:wrap; font-size:.86rem; color:var(--mut); margin-top:10px; }
+  .bar { height:6px; background:#0d1117; border-radius:3px; overflow:hidden; margin:12px 0 6px; }
+  .bar > div { height:100%; background:var(--acc); transition:width .3s; }
+  .stat { display:flex; justify-content:space-between; font-size:.86rem; color:var(--mut); }
+  table { width:100%; border-collapse:collapse; margin-top:12px; font-size:.9rem; }
+  th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--mut); font-weight:600; font-size:.78rem; text-transform:uppercase; letter-spacing:.03em; }
+  td.num { color:var(--mut); }
+  a.dl { color:var(--acc); text-decoration:none; font-weight:600; }
+  .badge { font-size:.76rem; padding:2px 8px; border-radius:99px; border:1px solid var(--line); color:var(--mut); }
+  .badge.done { color:var(--ok); border-color:var(--ok); }
+  .badge.failed { color:var(--err); border-color:var(--err); }
+  .note { font-size:.8rem; color:var(--mut); margin-top:14px; }
+  code { background:#0d1117; padding:1px 5px; border-radius:4px; font-size:.85em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Scans Anime-Sama → PDF</h1>
+  <p class="sub">Colle un lien de lecture, choisis les chapitres, télécharge chaque PDF au fil de l'eau.</p>
+
+  <div class="card">
+    <label for="url">Lien de l'œuvre</label>
+    <input id="url" type="url" placeholder="https://anime-sama.to/catalogue/the-greatest-estate-developer/scan/vf/" autocomplete="off" spellcheck="false">
+    <div class="actions">
+      <button id="analyze">Analyser</button>
+    </div>
+    <div class="msg" id="analyzeMsg"></div>
+  </div>
+
+  <div class="card" id="launchCard" hidden>
+    <div class="meta" style="margin-top:0">
+      <strong id="title" style="color:var(--txt)"></strong>
+      <span id="range"></span>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <div><label for="start">Chapitre début</label><input id="start" type="number" min="1"></div>
+      <div><label for="end">Chapitre fin</label><input id="end" type="number" min="1"></div>
+    </div>
+    <div class="actions">
+      <button id="launch">Lancer le téléchargement</button>
+    </div>
+    <div class="msg" id="launchMsg"></div>
+  </div>
+
+  <div class="card" id="jobCard" hidden>
+    <div class="stat"><span id="jobStatus">—</span><span id="jobPct"></span></div>
+    <div class="bar"><div id="jobBar" style="width:0"></div></div>
+    <div class="actions">
+      <button class="danger" id="cancel">Annuler</button>
+    </div>
+    <div class="msg" id="jobMsg"></div>
+    <table>
+      <thead><tr><th>Chapitre</th><th>État</th><th>Pages</th><th>Taille</th><th></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <p class="note">Télécharge chaque PDF dès qu'il est prêt. Un redéploiement du serveur efface ceux qui n'ont pas été téléchargés.</p>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const kb = n => n == null ? "—" : n < 1048576 ? Math.round(n / 1024) + " Ko" : (n / 1048576).toFixed(1) + " Mo";
+let jobId = localStorage.getItem("jobId") || null;
+let timer = null;
+
+const api = async (url, opts) => {
+  const res = await fetch(url, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Erreur " + res.status);
+  return data;
+};
+
+$("analyze").onclick = async () => {
+  $("analyze").disabled = true;
+  $("analyzeMsg").className = "msg";
+  $("analyzeMsg").textContent = "Analyse…";
+  try {
+    const info = await api("/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: $("url").value.trim() }),
+    });
+    $("title").textContent = info.oeuvre;
+    $("range").textContent = `Chapitres ${info.firstChapter}–${info.lastChapter} (${info.totalChapters} disponibles)`;
+    $("start").value = info.firstChapter;
+    $("end").value = info.lastChapter;
+    $("start").min = $("end").min = info.firstChapter;
+    $("start").max = $("end").max = info.lastChapter;
+    $("launchCard").hidden = false;
+    $("analyzeMsg").className = "msg ok";
+    $("analyzeMsg").textContent = "Œuvre reconnue.";
+  } catch (e) {
+    $("analyzeMsg").className = "msg err";
+    $("analyzeMsg").textContent = e.message;
+  } finally {
+    $("analyze").disabled = false;
+  }
+};
+
+$("launch").onclick = async () => {
+  $("launch").disabled = true;
+  try {
+    const job = await api("/api/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: $("url").value.trim(), start: $("start").value, end: $("end").value }),
+    });
+    jobId = job.id;
+    localStorage.setItem("jobId", jobId);
+    $("launchMsg").className = "msg ok";
+    $("launchMsg").textContent = "Job lancé.";
+    watch();
+  } catch (e) {
+    $("launchMsg").className = "msg err";
+    $("launchMsg").textContent = e.message;
+  } finally {
+    $("launch").disabled = false;
+  }
+};
+
+$("cancel").onclick = async () => {
+  if (!jobId) return;
+  try {
+    await api("/api/jobs/" + jobId, { method: "DELETE" });
+    $("jobMsg").className = "msg";
+    $("jobMsg").textContent = "Annulation demandée.";
+  } catch (e) {
+    $("jobMsg").className = "msg err";
+    $("jobMsg").textContent = e.message;
+  }
+};
+
+const labels = { queued: "en attente", running: "en cours", done: "terminé", cancelled: "annulé", error: "erreur" };
+
+function render(job) {
+  $("jobCard").hidden = false;
+  const p = job.progress;
+  const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
+  $("jobStatus").textContent = `${job.oeuvre} — ${labels[job.status] || job.status}` + (job.current ? ` · chapitre ${job.current}` : "");
+  $("jobPct").textContent = `${p.done}/${p.total} (${pct}%)`;
+  $("jobBar").style.width = pct + "%";
+
+  $("rows").innerHTML = job.chapters.map(c => {
+    let badge = '<span class="badge">en attente</span>';
+    if (c.status === "done") badge = c.expired ? '<span class="badge">expiré</span>' : '<span class="badge done">prêt</span>';
+    if (c.status === "failed") badge = `<span class="badge failed" title="${c.error || ""}">échec</span>`;
+    const dl = c.downloadUrl ? `<a class="dl" href="${c.downloadUrl}" download>Télécharger</a>` : "—";
+    return `<tr><td>${c.chap}</td><td>${badge}</td><td class="num">${c.pages ?? "—"}</td><td class="num">${kb(c.bytes)}</td><td>${dl}</td></tr>`;
+  }).join("");
+
+  if (job.status === "done" || job.status === "cancelled" || job.status === "error") {
+    clearInterval(timer);
+    timer = null;
+    $("jobMsg").className = "msg";
+    $("jobMsg").textContent = job.status === "done"
+      ? `${p.done} PDF générés${p.failed ? `, ${p.failed} en échec` : ""}.`
+      : labels[job.status];
+  }
+}
+
+async function poll() {
+  if (!jobId) return;
+  try {
+    render(await api("/api/jobs/" + jobId));
+  } catch (e) {
+    clearInterval(timer);
+    timer = null;
+    localStorage.removeItem("jobId");
+    jobId = null;
+    $("jobCard").hidden = true;
+    $("launchMsg").className = "msg err";
+    $("launchMsg").textContent = "Job introuvable (le serveur a peut-être redémarré).";
+  }
+}
+
+function watch() {
+  clearInterval(timer);
+  poll();
+  timer = setInterval(poll, 3000);
+}
+
+if (jobId) watch();
+</script>
+</body>
+</html>
